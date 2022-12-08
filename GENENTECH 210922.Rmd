@@ -1,0 +1,716 @@
+---
+title: "GENENTECH 21 09 22"
+author: "Eralp DOGU"
+date: "2022-09-20"
+output: html_document
+---
+
+## SETUP FOR DATA ANALYSIS
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(skimr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(knitr)
+library(kableExtra)
+library(stringr)
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("MSstatsQC")
+library(MSstatsQC)
+library(pollster)
+library(plotly)
+library(DT)
+library(reshape2)
+library(tidyr)
+library(ggmosaic)
+```
+
+\~8 slides highlighting the results
+
+Some ideas for the next steps (e.g.: how to leverage non-intensity QC info for the fragments)
+
+**Overall purpose:**
+
+\- Are the individual heavy measurements reliable enough for normalization (i.e. are we going to use 'reliable' heavy measurements to correct for technological artifacts, or are we going to add more noise?)
+
+\- Do we have enough data in heavy/light pairs to use heavy to normalize the light (normalize=remove nuisance technical variation)
+
+**Per-fragment analysis (multiple peptides/charges represented by a fragment; heavy) Purpose: QC**
+
+\- interesting fragments: often observed and relatively high intensity (average/median over all the runs)
+
+\- can look at multiple metrics
+
+\- important: % of missing values
+
+## DATA IMPORT
+
+```{r data import, echo=TRUE}
+#QCdata<- read.delim("/Users/ed/Downloads/", row.names=NULL, na.strings="NaN", stringsAsFactors=TRUE)
+HLdata<-readRDS("~/Library/CloudStorage/Box-Box/Download/HeavyTest/hl_data_20220919.RDS")
+Filename_runtime_report <- read.delim("~/Dropbox/GENENTECH/Filename_runtime_report.txt")
+load(file = "DATAGENENTECH.RData")
+guide.set<-QCdata
+```
+
+## DATA PROCESSING FOR HL DATA
+
+```{r time stamps, echo=TRUE}
+#RECODE TIME STAMPS FOR HL DATA
+HLdata$Run<-Filename_runtime_report$AcquiredTime[match(HLdata$Run, Filename_runtime_report$Run)]
+
+HLdata<-cbind(AcquiredTime=HLdata$Run, 
+                 Annotations="NULL", 
+                 Precursor=HLdata$PeptideSequence, 
+                 HLdata[,c(4, 6, 10:18)])
+HLdata[HLdata == "NaN"] <- NA
+HLdata<-HLdata[complete.cases(HLdata), ]
+HLdata<-HLdata[order(HLdata$AcquiredTime),]
+
+heavy.data.sum<-HLdata[HLdata$IsotopeLabelType=="H",]
+light.data.sum<-HLdata[HLdata$IsotopeLabelType=="L",]
+
+heavy.data.sum <- heavy.data.sum %>% 
+  group_by(Precursor, AcquiredTime) %>% 
+  summarise(Intensity = sum(Intensity))
+
+light.data.sum <- light.data.sum %>% 
+  group_by(Precursor, AcquiredTime) %>% 
+  summarise(Intensity = sum(Intensity))
+
+heavy.data.sum<-cbind(AcquiredTime=heavy.data.sum$AcquiredTime, 
+                      Annotations=NA, 
+                      Precursor=heavy.data.sum$Precursor,
+                      Intensity=log(heavy.data.sum$Intensity))
+
+light.data.sum<-cbind(AcquiredTime=light.data.sum$AcquiredTime, 
+                      Annotations=NA, 
+                      Precursor=light.data.sum$Precursor,
+                      Intensity=log(light.data.sum$Intensity))
+# #Fragment y9 and heavy/light
+# test.set.heavy<-HLdata[HLdata$IsotopeLabelType=="H" & HLdata$FragmentIon=="y9", -c(4:5)]
+# test.set.light<-HLdata[HLdata$IsotopeLabelType=="L" & HLdata$FragmentIon=="y9", -c(4:5)]
+# 
+heavy.data.sum<-as.data.frame(heavy.data.sum) 
+light.data.sum<-as.data.frame(light.data.sum) 
+
+heavy.data.sum$AcquiredTime<-as.numeric(heavy.data.sum$AcquiredTime)
+heavy.data.sum$Precursor<-as.factor(heavy.data.sum$Precursor)
+heavy.data.sum$Intensity<-as.numeric(heavy.data.sum$Intensity)
+
+light.data.sum$AcquiredTime<-as.numeric(light.data.sum$AcquiredTime)
+light.data.sum$Precursor<-as.factor(light.data.sum$Precursor)
+light.data.sum$Intensity<-as.numeric(light.data.sum$Intensity)
+
+missing.peptides.heavy<-as.data.frame(100-(sort(table(heavy.data.sum$AcquiredTime)))/138*100)
+
+missing.runs.heavy<-as.data.frame((260-sort(table(heavy.data.sum$Precursor)))/260*100)
+
+heavy.pairs<-heavy.data.sum[heavy.data.sum$Precursor %in% light.data.sum$Precursor,]
+
+matched.HL.percent<-nlevels(heavy.pairs$Precursor)/nlevels(light.data.sum$Precursor)
+
+barplot((100-sort(table(heavy.data.sum$AcquiredTime)))/138*100, main="", xlab="% Missing Peptides", ylab="Run", horiz=TRUE, cex.names = 0.5, xlim=c(0,100), col="grey", border=NA)
+
+hist(missing.peptides.heavy$Freq, ylab="Frequency", xlab="% Missing Peptides", main="")
+summary(missing.peptides.heavy$Freq)
+barplot((260-sort(table(heavy.data.sum$Precursor)))/260*100, main="", xlab="% Missing Runs", horiz = TRUE, las=1, cex.names = 0.2, xlim=c(0,100), col="grey", border=NA)
+hist(missing.runs.heavy$Freq, ylab="Frequency", xlab="% Missing Runs", main="")
+summary(missing.runs.heavy$Freq)
+# 
+# Peptides.heavy<-as.data.frame(table(test.set.heavy$Precursor))
+# Peptides.light<-as.data.frame(table(test.set.light$Precursor))
+```
+
+## DATA PROCESSING FOR QC DATA
+
+```{r data cleaning qc data, echo=TRUE}
+#IDENTIFIED
+#NOT EXCLUDED FROM QUANTIFICATION
+table(guide.set$EG.Identified)
+table(guide.set$F.ExcludedFromQuantification)
+
+#MATCHING QC METRICS WITH TEST SET
+guide.set <- guide.set %>%
+  filter( EG.Identified=="True") %>%
+  filter( F.ExcludedFromQuantification=="False") %>%
+  select(c(R.Condition, R.FileName, R.Replicate, EG.ModifiedSequence, FG.LabeledSequence, F.FrgIon, F.MeasuredRelativeIntensity, F.PeakArea, F.MassAccuracyPPM, EG.Qvalue, EG.FWHM, EG.ApexRT, FG.ShapeQualityScore..MS1., EG.Qvalue, PG.Qvalue))
+
+guide.set$EG.ModifiedSequence<-gsub("_", "", guide.set$EG.ModifiedSequence)
+guide.set$FG.LabeledSequence<-gsub("_", "", guide.set$FG.LabeledSequence)
+
+guide.set <- guide.set %>% filter(F.FrgIon=="y9")
+#Remove Arg10 or Lys12 variants from the guide set
+guide.set<-guide.set %>% filter(EG.ModifiedSequence==FG.LabeledSequence) 
+
+#SPLIT FILE NAME 
+guide.set <- cbind(str_split_fixed(guide.set$R.FileName, "_", 6), guide.set[,-1])
+guide.set<-guide.set[,6:19]
+
+guide.set <- mutate(guide.set, AcquiredTime = recode(`6`, R01=29, R02=61, R03=96, R04=129, R05=161, R06=190, R07=222, R08=254))
+
+guide.set<-cbind(AcquiredTime=guide.set$AcquiredTime, 
+                 Annotations=NA, 
+                 Precursor=guide.set$EG.ModifiedSequence, 
+                 guide.set[,c(7:14)])
+guide.set<-cbind(guide.set[,-c(7,11)], guide.set$EG.Qvalue, guide.set$PG.Qvalue)
+
+colnames(guide.set)<-c("AcquiredTime", "Annotations", "Precursor",  "MeasuredRelativeIntensity", "PeakArea",
+                       "MassAccuracyPPM", "FWHM", "ApexRT", "ShapeQualityScore", "EG.Qvalue", "PG.Qvalue")
+
+```
+
+```{r Plot functions}
+
+getMetricData <- function(data, peptide, L, U, metric, normalization, selectMean, selectSD) {
+  #"Precursor" is one of the columns in data that shows the name of peptides
+  precursor.data<-data[data$Precursor==peptide,]
+  metricData <- 0
+  mu <- 0
+  sd <- 0
+
+  if(is.null(metric)){
+    return(NULL)
+  }
+
+  metricData = select(precursor.data,metric)
+
+  if(normalization == TRUE) {
+    if(is.null(selectMean) && is.null(selectSD)) {
+      mu=mean(metricData[L:U]) # in-control process mean
+      sd=sd(metricData[L:U]) # in-control process variance
+    }else {
+      mu = selectMean
+      sd = selectSD
+    }
+
+    if(sd == 0) {sd <- 0.0001}
+    metricData=scale(metricData[seq_along(metricData)],mu,sd) # transformation for N(0,1) )
+    return(metricData)
+  } else if(normalization == FALSE){
+    return(metricData)
+  }
+
+}
+
+XmR.data.prepare <- function(metricData, L, U, type, selectMean, selectSD) {
+  t <- numeric(length(metricData))
+  UCL <- 0
+  LCL <- 0
+  InRangeOutRange <- rep(0,length(metricData))
+
+  for(i in 2:length(metricData)) {
+    t[i] <- abs(metricData[i]-metricData[i-1])
+  }
+
+  QCno <- seq_along(metricData)
+
+  if(type == "mean") {
+    if(is.null(selectMean) && is.null(selectSD)) {
+      UCL=mean(metricData[L:U])+2.66*sd(t[L:U])
+      LCL=mean(metricData[L:U])-2.66*sd(t[L:U])
+    }else {
+      UCL = selectMean + 2.66 * selectSD
+      LCL = selectMean - 2.66 * selectSD
+    }
+    t <- metricData
+  }else if(type == "variability") {
+
+    if(is.null(selectMean) && is.null(selectSD)) {
+      UCL=3.267*sd(t[1:L-U])
+    }else{
+      UCL = 3.267 * selectSD
+    }
+    LCL=0
+  }
+
+  for(i in seq_along(metricData)) {
+    if(t[i] >= LCL && t[i] <= UCL)
+      InRangeOutRange[i] <- "InRange"
+    else
+      InRangeOutRange[i] <- "OutRange"
+  }
+
+  plot.data <- data.frame(QCno,IndividualValue=metricData, mR=t, UCL, LCL, InRangeOutRange)
+  return(plot.data)
+}
+```
+
+## RESULTS
+
+## 1. **Per-precursor analysis (multiple peptides/charges; heavy) Purpose: QC**
+
+\- intensity only (in/out of range)
+
+\- sum of intensities of all the fragments (before the log; log transform after the sum)
+
+\- % of missing values
+
+```{r Intensity ASVSVTAEDEGTQR, echo=TRUE, results='asis'}
+data<-heavy.pairs %>% group_by(Precursor) %>% filter(n()>1) 
+data$Precursor<-factor(data$Precursor)
+data$Precursor<-as.factor(data$Precursor)
+data<-as.data.frame(data)
+data.summary.heavy<-cbind(data[,1:3], data["I",4])
+data.summary.heavy<-as.data.frame(data.summary.heavy)
+for (j in 1:nlevels(data$Precursor)) {
+for (i in 4:4) {
+peptide=levels(data$Precursor)[j]
+L=1
+U=length(data[data$Precursor==levels(data$Precursor)[j],1])
+metric=colnames(data)[i]
+type="mean"
+metricData <- getMetricData(data, peptide, L, U, metric, normalization=FALSE, selectMean=NULL, selectSD=NULL)
+metricData<-metricData[,1]
+plot.data.heavy <- XmR.data.prepare(metricData, L, U, type= "mean", selectMean=NULL, selectSD=NULL)
+data.summary.heavy[data.summary.heavy$Precursor==levels(data$Precursor)[j],i]<-plot.data.heavy$InRangeOutRange
+}
+}
+
+colnames(data.summary.heavy)<-colnames(data)
+SPC.results<-table(data.summary.heavy$Precursor, data.summary.heavy$Intensity)
+SPC.results<-data.frame(SPC.results)
+SPC.results.IN<-SPC.results[SPC.results$Var2=="InRange",]
+SPC.results.OUT<-SPC.results[SPC.results$Var2=="OutRange",]
+Percent.Out<-data.frame(SPC.results.IN$Var1, SPC.results.OUT$Freq/SPC.results.IN$Freq, SPC.results.IN$Freq)
+colnames(Percent.Out)<-c("Precursor", "Percent", "N")
+Percent.Out<-Percent.Out[order(Percent.Out$Percent),]
+summary(Percent.Out$Percent)
+ggplot(data = Percent.Out, aes(x = Precursor, y = Percent)) +
+       geom_bar(stat = "identity") +
+       coord_flip() + 
+  ylim(0, 1) +# Horizontal bar plot
+  scale_fill_grey() +
+  ylab("Percent Out Range")+
+  xlab("Peptide")+
+  theme(axis.text=element_text(size=2),
+        axis.title=element_text(size=8,face="bold"))
+
+  ggplot(data = filter(Percent.Out, Percent>0.05), aes(x = Precursor, y = Percent)) +
+       geom_bar(stat = "identity") +
+       coord_flip() + 
+  ylim(0, 0.2) +# Horizontal bar plot
+  scale_fill_grey() +
+  ylab("Percent Out Range")+
+  xlab("Peptide")+
+  theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=8,face="bold"))
+  
+  ggplot(data = filter(Percent.Out, Percent==0.00), aes(x = Precursor, y = Percent)) +
+       geom_bar(stat = "identity") +
+       coord_flip() + 
+  ylim(0, 0.2) +# Horizontal bar plot
+  scale_fill_grey() +
+  ylab("Percent Out Range")+
+  xlab("Peptide")+
+  theme(axis.text=element_text(size=5),
+        axis.title=element_text(size=8,face="bold"))
+        
+data.summary.heavy[1:9384, c(1,3:4)] %>% melt(id.vars = c('AcquiredTime', 'Intensity')) %>% 
+  ggplot(aes(x = AcquiredTime, y = as.factor(value), 
+             fill = as.factor(Intensity))) +
+  geom_tile() +
+  scale_fill_manual(values = c('white','blue','grey')) +
+  labs(x = 'Run', y = 'Precursor',fill = '')+
+  theme(axis.text=element_text(size=2),
+        axis.title=element_text(size=8,face="bold"))
+
+data.OutRange<-table(data.summary.heavy$AcquiredTime,data.summary.heavy$Intensity)
+data.OutRange<-filter(as.data.frame(data.OutRange), Freq>10 & Var2=="OutRange")
+
+```
+
+## 2. **Per-precursor (heavy and light pairs) Purpose: relative quant of light, adjusted for heavy**
+
+\- intensity only (in/out of range)
+
+\- sum of intensities of all the fragments (before the log; log transform after the sum)
+
+\- % of pairs with at least one missing
+
+\- % of pairs where heavy are out of range in some sense (either as in the per-precursor analysis, or in a per-fragment analysis)
+
+E.g.: a heatmap; white if both heavy and light are missing; grey if one of the two is missing; purple if heavy-sum is out of range; red if one of the fragments that contributed to the heavy-sum is out of range
+
+```{r Peak Area ASVSVTAEDEGTQR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=data, peptide = "SLGPALLLLQK",  metric="Intensity", L=1, U=5, type="variation")
+g2 <-MSstatsQC::XmRChart(data=data, peptide = "FGQSC[Carbamidomethyl (C)]QEQC[Carbamidomethyl (C)]PGISGC[Carbamidomethyl (C)]R",  metric="Intensity", L=1, U=28, type="mean")
+g3 <-MSstatsQC::XmRChart(data=data, peptide = "VEYQC[Carbamidomethyl (C)]QSYYELQGSK",  metric="Intensity", L=1, U=8, type="mean")
+g4 <-MSstatsQC::XmRChart(data=data, peptide = "YDPSLKPLSVSYDQATSLR",  metric="Intensity", L=1, U=20, type="mean")
+g5 <-MSstatsQC::XmRChart(data=data, peptide = "TLAQLNPESSLFIIASK",  metric="Intensity", L=1, U=121, type="mean")
+g6 <-MSstatsQC::XmRChart(data=data, peptide = "VHVGDEDFVHLR",  metric="Intensity", L=1, U=94, type="mean")
+g7 <-MSstatsQC::XmRChart(data=data, peptide = "DGTFPLPIGESVTVTR",  metric="Intensity", L=1, U=10, type="mean")
+
+```
+
+**Per-fragment analysis (multiple peptides/charges represented by a fragment; heavy) Purpose: QC**
+
+\- interesting fragments: often observed and relatively high intensity (average/median over all the runs)
+
+\- can look at multiple metrics
+
+\- important: % of missing values
+
+```{r FWHM ASVSVTAEDEGTQR, echo=TRUE, results='asis'}
+heavy.data.sum<-HLdata[HLdata$IsotopeLabelType=="H",]
+heavy.data.sum <- heavy.data.sum %>% 
+  group_by(Precursor, FragmentIon, AcquiredTime) %>% 
+  summarise(Intensity = median(log(Intensity)))
+
+#%missing runs per fragment
+barplot(sort((1-table(heavy.data.sum$FragmentIon)/(138*260))*100), main="", xlab="% Missing Runs", ylab="Fragment Ion", horiz = TRUE, las=1, cex.names = 0.8, xlim=c(0,100), col="grey", border=NA)
+
+hist(heavy.data.sum$Intensity)
+data.summary.fragment<-table(heavy.data.sum$Precursor, heavy.data.sum$FragmentIon)
+View(data.summary.fragment)
+
+heavy.data.sum %>% 
+  filter(Precursor=="ILLDEQAQWK") %>% 
+  select(FragmentIon:Intensity) %>%
+  melt(id.vars = c('AcquiredTime', 'Intensity', 'Precursor')) %>% 
+  ggplot(aes(x = AcquiredTime, y = as.factor(value), 
+             fill = Intensity)) +
+  geom_tile()+
+  labs(x = 'Run', y = 'Fragment Ion', fill = '')+
+  xlim(0, 260) +
+  coord_fixed(ratio=5) +
+  scale_fill_gradientn(colours=hcl.colors(15, palette = "Blues 3"), limits=c(10,20))+
+  scale_fill_distiller(direction = 1) +
+  theme(axis.text=element_text(size=4),
+        axis.title=element_text(size=8,face="bold"),
+        legend.key.size = unit(0.2, 'cm'),
+        legend.text = element_text(size=4) )
+
+heavy.data.sum %>% 
+  filter(FragmentIon=="y15") %>% 
+  select(FragmentIon:Intensity) %>%
+  melt(id.vars = c('AcquiredTime', 'Intensity', 'Precursor')) %>% 
+  ggplot(aes(x = AcquiredTime, y = as.factor(Precursor), 
+             fill = Intensity)) +
+  geom_tile()+
+  labs(x = 'Run', y = 'Fragment Ion', fill = '')+
+  xlim(0, 260) +
+  coord_fixed(ratio=5) +
+  scale_fill_gradientn(colours=hcl.colors(15, palette = "Blues 3"), limits=c(10,20))+
+  scale_fill_distiller(direction = 1) +
+  theme(axis.text=element_text(size=4),
+        axis.title=element_text(size=8,face="bold"),
+        legend.key.size = unit(0.2, 'cm'),
+        legend.text = element_text(size=4) )
+```
+
+```{r RT ASVSVTAEDEGTQR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "ASVSVTAEDEGTQR",  
+                         metric="ApexRt", L=1, U=190, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "ASVSVTAEDEGTQR",  
+                         metric="ApexRt", L=1, U=190, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+## 2. RESULTS FOR PEPTIDE TGQQLTSDQLPIK (LARGE SAMPLE EXAMPLE 2)
+
+```{r Intensity TGQQLTSDQLPIK, echo=TRUE, results='asis'}
+#Missing values in QC data
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "TGQQLTSDQLPIK",  
+                         metric="MeasuredRelativeIntensity", L=1, U=193, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "TGQQLTSDQLPIK",  
+                         metric="MeasuredRelativeIntensity", L=1, U=193, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Peak Area TGQQLTSDQLPIK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "TGQQLTSDQLPIK",  
+                         metric="PeakArea", L=1, U=193, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "TGQQLTSDQLPIK",  
+                         metric="PeakArea", L=1, U=193, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r FWHM TGQQLTSDQLPIK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "TGQQLTSDQLPIK",  
+                         metric="FWHM", L=1, U=193, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "TGQQLTSDQLPIK",  
+                         metric="FWHM", L=1, U=193, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Shape Quality TGQQLTSDQLPIK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "TGQQLTSDQLPIK",  
+                         metric="ShapeQualityScore", L=1, U=193, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "TGQQLTSDQLPIK",  
+                         metric="ShapeQualityScore", L=1, U=193, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r RT TGQQLTSDQLPIK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "TGQQLTSDQLPIK",  
+                         metric="ApexRt", L=1, U=193, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "TGQQLTSDQLPIK",  
+                         metric="ApexRt", L=1, U=193, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+## 3. RESULTS FOR PEPTIDE KDVLETFTVK (LARGE SAMPLE EXAMPLE 3)
+
+```{r Intensity KDVLETFTVK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "KDVLETFTVK",  
+                         metric="MeasuredRelativeIntensity", L=1, U=252, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "KDVLETFTVK",  
+                         metric="MeasuredRelativeIntensity", L=1, U=252, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Peak Area KDVLETFTVK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "KDVLETFTVK",  
+                         metric="PeakArea", L=1, U=252, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "KDVLETFTVK",  
+                         metric="PeakArea", L=1, U=252, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r FWHM KDVLETFTVK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "KDVLETFTVK",  
+                         metric="FWHM", L=1, U=252, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "KDVLETFTVK",  
+                         metric="FWHM", L=1, U=252, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Shape Quality KDVLETFTVK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "KDVLETFTVK",  
+                         metric="ShapeQualityScore", L=1, U=252, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "KDVLETFTVK",  
+                         metric="ShapeQualityScore", L=1, U=252, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r RT KDVLETFTVK, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "KDVLETFTVK",  
+                         metric="ApexRt", L=1, U=252, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "KDVLETFTVK",  
+                         metric="ApexRt", L=1, U=252, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+## 4. RESULTS FOR PEPTIDE FSLVSGWGQLLDR (SMALL SAMPLE EXAMPLE 1)
+
+```{r Intensity FSLVSGWGQLLDR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "FSLVSGWGQLLDR",  
+                         metric="MeasuredRelativeIntensity", L=1, U=39, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "FSLVSGWGQLLDR",  
+                         metric="MeasuredRelativeIntensity", L=1, U=39, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Peak Area FSLVSGWGQLLDR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "FSLVSGWGQLLDR",  
+                         metric="PeakArea", L=1, U=39, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "FSLVSGWGQLLDR",  
+                         metric="PeakArea", L=1, U=39, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r FWHM FSLVSGWGQLLDR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "FSLVSGWGQLLDR",  
+                         metric="FWHM", L=1, U=39, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "FSLVSGWGQLLDR",  
+                         metric="FWHM", L=1, U=39, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Shape Quality FSLVSGWGQLLDR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "FSLVSGWGQLLDR",  
+                         metric="ShapeQualityScore", L=1, U=39, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "FSLVSGWGQLLDR",  
+                         metric="ShapeQualityScore", L=1, U=39, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r RT FSLVSGWGQLLDR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "FSLVSGWGQLLDR",  
+                         metric="ApexRt", L=1, U=39, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "FSLVSGWGQLLDR",  
+                         metric="ApexRt", L=1, U=39, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+## 5. RESULTS FOR PEPTIDE YDPSLKPLSVSYDQATSLR (SMALL SAMPLE EXAMPLE 2)
+
+```{r Intensity YDPSLKPLSVSYDQATSLR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="MeasuredRelativeIntensity", L=1, U=25, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="MeasuredRelativeIntensity", L=1, U=25, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Peak Area YDPSLKPLSVSYDQATSLR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="PeakArea", L=1, U=25, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="PeakArea", L=1, U=25, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r FWHM YDPSLKPLSVSYDQATSLR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="FWHM", L=1, U=25, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="FWHM", L=1, U=25, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r Shape Quality YDPSLKPLSVSYDQATSLR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="ShapeQualityScore", L=1, U=25, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="ShapeQualityScore", L=1, U=25, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+```{r RT YDPSLKPLSVSYDQATSLR, echo=TRUE, results='asis'}
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="ApexRt", L=1, U=25, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "YDPSLKPLSVSYDQATSLR",  
+                         metric="ApexRt", L=1, U=25, type="mean")
+subplot(g1, g2, nrows = 2)
+```
+
+## 6. RESULTS FOR PEPTIDE VTSVVTGFNNLPDR (LARGE SAMPLE EXAMPLE WITH QC 1)
+
+```{r Intensity VTSVVTGFNNLPDR, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "VTSVVTGFNNLPDR",  
+                         metric="MeasuredRelativeIntensity", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "VTSVVTGFNNLPDR",  
+                         metric="MeasuredRelativeIntensity", L=1, U=262, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "VTSVVTGFNNLPDR",  
+                         metric="MeasuredRelativeIntensity", L=1, U=262, type="mean")
+subplot(g0, g1, g2, nrows = 3)
+```
+
+```{r Peak Area VTSVVTGFNNLPDR, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "VTSVVTGFNNLPDR",  
+                         metric="PeakArea", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "VTSVVTGFNNLPDR",  
+                         metric="PeakArea", L=1, U=262, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "VTSVVTGFNNLPDR",  
+                         metric="PeakArea", L=1, U=262, type="mean")
+subplot(g0, g1, g2, nrows = 3)
+```
+
+```{r FWHM VTSVVTGFNNLPDR, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "VTSVVTGFNNLPDR",  
+                         metric="FWHM", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "VTSVVTGFNNLPDR",  
+                         metric="FWHM", L=1, U=262, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "VTSVVTGFNNLPDR",  
+                         metric="FWHM", L=1, U=262, type="mean")
+subplot(g0, g1, g2, nrows = 3)
+```
+
+```{r Shape Quality VTSVVTGFNNLPDR, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "VTSVVTGFNNLPDR",  
+                         metric="ShapeQualityScore", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "VTSVVTGFNNLPDR",  
+                         metric="ShapeQualityScore", L=1, U=262, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "VTSVVTGFNNLPDR",  
+                         metric="ShapeQualityScore", L=1, U=262, type="mean")
+subplot(g0, g1, g2, nrows=3)
+```
+
+```{r RT VTSVVTGFNNLPDR, echo=TRUE, results='asis'}
+# g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "VTSVVTGFNNLPDR",  
+#                          metric="ApexRt", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "VTSVVTGFNNLPDR",  
+                         metric="ApexRt", L=1, U=262, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "VTSVVTGFNNLPDR",  
+                         metric="ApexRt", L=1, U=262, type="mean")
+subplot(g0,g1,g2, nrows = 3)
+```
+
+## 7. RESULTS FOR PEPTIDE LFDEINPETK (LARGE SAMPLE EXAMPLE WITH QC 2)
+
+```{r Intensity LFDEINPETK, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "LFDEINPETK",  
+                         metric="MeasuredRelativeIntensity", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "LFDEINPETK",  
+                         metric="MeasuredRelativeIntensity", L=1, U=199, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "LFDEINPETK",  
+                         metric="MeasuredRelativeIntensity", L=1, U=199, type="mean")
+subplot(g0,g1,g2, nrows = 3)
+```
+
+```{r Peak Area LFDEINPETK, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "LFDEINPETK",  
+                         metric="PeakArea", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "LFDEINPETK",  
+                         metric="PeakArea", L=1, U=199, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "LFDEINPETK",  
+                         metric="PeakArea", L=1, U=199, type="mean")
+subplot(g0,g1,g2, nrows = 3)
+```
+
+```{r FWHM LFDEINPETK, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "LFDEINPETK",  
+                         metric="FWHM", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "LFDEINPETK",  
+                         metric="FWHM", L=1, U=199, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "LFDEINPETK",  
+                         metric="FWHM", L=1, U=199, type="mean")
+subplot(g0,g1,g2, nrows = 3)
+```
+
+```{r Shape Quality LFDEINPETK, echo=TRUE, results='asis'}
+g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "LFDEINPETK",  
+                         metric="ShapeQualityScore", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "LFDEINPETK",  
+                         metric="ShapeQualityScore", L=1, U=199, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "LFDEINPETK",  
+                         metric="ShapeQualityScore", L=1, U=199, type="mean")
+subplot(g0,g1,g2, nrows = 3)
+```
+
+```{r RT LFDEINPETK, echo=TRUE, results='asis'}
+#g0<-MSstatsQC::XmRChart(data=guide.set, peptide = "LFDEINPETK",  
+#                         metric="ApexRt", L=1, U=8, type="mean")
+g1 <-MSstatsQC::XmRChart(data=test.set.heavy, peptide = "LFDEINPETK",  
+                         metric="ApexRt", L=1, U=199, type="mean")
+g2 <-MSstatsQC::XmRChart(data=test.set.light, peptide = "LFDEINPETK",  
+                         metric="ApexRt", L=1, U=199, type="mean")
+subplot(g0, g1, g2, nrows = 3)
+```
+
+## 8. MSStatsQC-ML
+
+```{r MSstatsQC-ML}
+guide.set.H<-filter(test.set.heavy, test.set.heavy$Precursor=="ASVSVTAEDEGTQR"|
+                    test.set.heavy$Precursor=="TGQQLTSDQLPIK"|
+                     test.set.heavy$Precursor=="KDVLETFTVK"|
+                      test.set.heavy$Precursor=="FSLVSGWGQLLDR"|
+                      test.set.heavy$Precursor=="VTSVVTGFNNLPDR")
+test.set.L<-filter(test.set.light, test.set.light$Precursor=="ASVSVTAEDEGTQR"|
+                     test.set.light$Precursor=="TGQQLTSDQLPIK"|
+                      test.set.light$Precursor=="TGQQLTSDQLPIK"|
+                     test.set.light$Precursor=="KDVLETFTVK"|
+                      test.set.light$Precursor=="FSLVSGWGQLLDR"|
+                      test.set.light$Precursor=="VTSVVTGFNNLPDR")
+
+guide.set.H<-guide.set.H[,c(1,3,4,6,9)]
+test.set.L<-test.set.L[,c(1,3,4,6,9)]
+
+colnames(guide.set.H)[1:2]<-c("idfile","peptide")
+colnames(test.set.L)[1:2]<-c("idfile","peptide")
+
+guide.set.H$peptide<-as.factor(guide.set.H$peptide)
+test.set.L$peptide<-as.factor(test.set.L$peptide)
+
+#guide.set.H<-cbind(guide.set.H[,1:2], scale(guide.set.H[,3:5]))
+#test.set.L<-cbind(test.set.L[,1:2], scale(test.set.L[,3:5]))
+
+guide.set.H<-as.data.frame(guide.set.H)
+test.set.L<-as.data.frame(test.set.L)
+
+```
